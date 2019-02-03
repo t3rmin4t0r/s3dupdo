@@ -15,6 +15,7 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import org.apache.commons.logging.LogFactory;
@@ -200,7 +201,7 @@ public abstract class Works {
   }
   
 
-  public static class CopyWorker implements Callable<Void> {
+  public static class CopyWorker implements Callable<Boolean> {
     private static final Logger LOG = LoggerFactory.getLogger(CopyWorker.class
         .getName());
 
@@ -216,6 +217,8 @@ public abstract class Works {
     }
 
     private void complete(CopyOp op) throws IOException   {
+      System.out.println(Thread.currentThread().getName() + " :" + op );
+      System.out.println("Pending copies : " + queue.size());
       synchronized (db) {
         try {
           PreparedStatement update = db
@@ -223,7 +226,6 @@ public abstract class Works {
           update.setString(1, op.src);
           update.executeUpdate();
           update.close();
-          System.out.println(op.src);
         } catch (SQLException e) {
           e.printStackTrace();
           throw new IOException(e);
@@ -256,7 +258,6 @@ public abstract class Works {
           in.close();
           out.close();
           LOG.info("Copied {}", op);
-          System.out.println(Thread.currentThread().getName() + " :" + op );
           // everything looks okay 
           complete(op);
           op = this.queue.poll();
@@ -274,9 +275,9 @@ public abstract class Works {
     }
 
     @Override
-    public Void call() throws Exception {
+    public Boolean call() throws Exception {
       run();
-      return null;
+      return true;
     }
   }
 
