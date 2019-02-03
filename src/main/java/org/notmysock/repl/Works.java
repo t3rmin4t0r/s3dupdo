@@ -153,7 +153,7 @@ public abstract class Works {
         stmt.close();
         
         stmt = db.createStatement();
-        String inputs = "select SRC, DST, SIZE from FILES where copied <> 1";
+        String inputs = "select SRC, DST, SIZE from FILES where copied <> 1 ORDER BY SIZE";
         rs = stmt.executeQuery(inputs);
         int maxItems =  (int) (numFiles + 1);
         ArrayBlockingQueue<CopyOp> copies = new ArrayBlockingQueue<>(maxItems);
