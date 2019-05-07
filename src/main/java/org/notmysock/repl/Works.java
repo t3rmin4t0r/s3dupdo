@@ -191,6 +191,9 @@ public abstract class Works {
     public CopyOp(String src, String dst, long size) {
       this.src = src;
       this.dst = dst;
+      if (src.equals(dst)) {
+        throw new IllegalArgumentException(String.format("Source cannot be the same as destination: %s", src));
+      }
       this.size = size;
     }
     
