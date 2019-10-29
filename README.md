@@ -29,7 +29,7 @@ Missing operation
  -v,--verbose <arg>      verbose
 ```
 
-##Plan
+## Plan
 
 ```java
 -- defaults
@@ -39,7 +39,7 @@ java -cp ./target/*:./target/lib/*:.: org.notmysock.repl.S3Dupdo -s s3a://bucket
 java -cp ./target/*:./target/lib/*:.: org.notmysock.repl.S3Dupdo -s s3a://bucket1/src/ -d s3a://bucket1/dst/ -op plan -n 3 test_s3_3_nodes.sqlite
 ```
 
-##Run
+## Run
 
 ```java
 -- defaults. In this mode, all files are copied via single client node with specified parallelism of 10.
@@ -49,7 +49,7 @@ java -cp ./target/*:./target/lib/*:.: org.notmysock.repl.S3Dupdo -op run -p 10 t
 java -cp ./target/*:./target/lib/*:.: org.notmysock.repl.S3Dupdo -op run -p 10 -i 0 test_s3_3_nodes.sqlite
 ```
 
-##Info
+## Info
 To know details about the persisted data, you can run `info` command to get
  the details on the number of files copied, number of nodes etc.
 ```java
@@ -66,7 +66,7 @@ Yet to be copied files stats:
 	Distinct Nodes : 3
 ```
 
-#Debugging
+# Debugging
 
 - When running `plan`, `UNIQUE constraint failed` exception is thrown.
 e.g
