@@ -18,28 +18,31 @@ public class S3Dupdo extends Configured implements Tool {
     int res = ToolRunner.run(conf, new S3Dupdo(), args);
     System.exit(res);
   }
-  
+
   private static enum Operation {
     PLAN,
     RUN,
+    INFO,
     VERIFY,
     RESET;
 
     public static Operation getOperation(String optionValue) {
       return Operation.valueOf(optionValue.toUpperCase());
     }
-  };
-  
+  }
+
   static Options options;
   static {
     options = new org.apache.commons.cli.Options();
     options.addOption("op", "operation", true, "operation (plan, run, verify)");
     options.addOption("p", "parallel", true, "parallelize n-way");
+    options.addOption("n", "nodes", true, "parallelize n-nodes");
+    options.addOption("i", "nodeId", true, "nodeId during copy");
     options.addOption("s", "src", true, "source data");
     options.addOption("d", "dst", true, "destination data");
     options.addOption("v", "verbose", true, "verbose");
   }
-  
+
   private static void help(String error) {
     HelpFormatter f = new HelpFormatter();
     f.printHelp(S3Dupdo.class.getSimpleName(), error, options, "", true);
@@ -61,12 +64,12 @@ public class S3Dupdo extends Configured implements Tool {
     } else {
       op = Operation.getOperation(line.getOptionValue("operation"));
     }
-    
+
     if (line.getArgList().size() == 0) {
-      help("Missing name for saving state");
+      help("Provide DB file name where it should be persisted to.");
       return 1;
     }
-    
+
     final String name = (String) line.getArgList().get(0);
 
     final Work work;
@@ -81,16 +84,31 @@ public class S3Dupdo extends Configured implements Tool {
         help("Missing dst for planning");
         return 1;
       }
-      work = new Works.PlanWork(name, line.getOptionValue("src"), line.getOptionValue("dst"));
+      int numNodes = 1;
+      if (line.hasOption("nodes")) {
+        numNodes = Integer.parseInt(line.getOptionValue("nodes"));
+        System.out.println("Using numNodes: " + numNodes);
+      }
+      work = new Works.PlanWork(name, line.getOptionValue("src"),
+          line.getOptionValue("dst"), numNodes);
       break;
     case RUN:
       final int parallel;
+      // Set nodeId to -1 if unspecified. This node would pull all files.
+      int nodeId = (line.hasOption("nodeId")) ?
+          Integer.parseInt(line.getOptionValue("nodeId")) : -1;
+      if (nodeId != -1) {
+        System.out.println("Using nodeId: " + nodeId);
+      }
       if (!line.hasOption("parallel")) {
         parallel = 1;
       } else {
         parallel = Integer.parseInt(line.getOptionValue("parallel"));
       }
-      work = new Works.CopyWork(name, parallel);
+      work = new Works.CopyWork(name, parallel, nodeId);
+      break;
+    case INFO:
+      work = new Works.InfoWork(name);
       break;
     case RESET:
       // TODO
@@ -104,9 +122,10 @@ public class S3Dupdo extends Configured implements Tool {
       work = null;
       break;
     }
-    
+
     if (work != null) {
       work.execute(getConf());
+      work.report();
     }
 
     return 0;

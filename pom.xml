@@ -17,10 +17,17 @@
 
   <properties>
   	<hadoop.version>3.0.0</hadoop.version>
+    <dropwizard.version>3.1.0</dropwizard.version>
   </properties>
 
 
   <dependencies>
+    <dependency>
+      <groupId>io.dropwizard.metrics</groupId>
+      <artifactId>metrics-core</artifactId>
+      <version>${dropwizard.version}</version>
+    </dependency>
+
     <dependency>
       <groupId>org.apache.hadoop</groupId>
       <artifactId>hadoop-client</artifactId>

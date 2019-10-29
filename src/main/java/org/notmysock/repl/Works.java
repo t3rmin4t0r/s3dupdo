@@ -18,7 +18,9 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import org.apache.commons.logging.LogFactory;
+import com.codahale.metrics.ConsoleReporter;
+import com.codahale.metrics.Meter;
+import com.codahale.metrics.MetricRegistry;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FSDataOutputStream;
@@ -32,37 +34,63 @@ import org.slf4j.LoggerFactory;
 
 public abstract class Works {
 
-  public static interface Work {
-    public void execute(Configuration conf) throws Exception;
+  static final MetricRegistry metricRegistry = new MetricRegistry();
+  static final String PROCESSED_FILES = "processedFiles";
+  static final Meter processedFiles = metricRegistry.meter(PROCESSED_FILES);
+
+  interface Work {
+    void execute(Configuration conf) throws Exception;
+
+    default void report() {
+      ConsoleReporter reporter = ConsoleReporter
+          .forRegistry(metricRegistry)
+          .convertRatesTo(TimeUnit.SECONDS)
+          .build();
+      reporter.report();
+    }
+  }
+
+  static Connection getConnection(String name) throws SQLException {
+    java.nio.file.Path currentRelativePath = Paths.get("");
+    String cwd = currentRelativePath.toAbsolutePath().toString();
+    final String statedb = "jdbc:sqlite:" + cwd + "/" + name;
+    Connection conn = DriverManager.getConnection(statedb);
+    return conn;
   }
 
   public static class PlanWork implements Work {
+
+    private static final Logger LOG = LoggerFactory.getLogger(PlanWork.class
+        .getName());
+
     private final String dst;
     private final String src;
     private final String name;
+    private final int numNodes;
 
-    public PlanWork(String name, String src, String dst) throws URISyntaxException {
+    public PlanWork(String name, String src, String dst, int numNodes)
+        throws URISyntaxException {
       this.name = name;
       this.src = src;
-      if (dst.endsWith("/")) {
-        dst = dst.substring(0, dst.length()-1);
+      // Add "/" if required. e.g s3a://bucket/dst ->  s3a://bucket/dst/
+      if (!dst.endsWith("/")) {
+        dst = dst + "/";
       }
       this.dst = dst;
+      this.numNodes = numNodes;
     }
-    
+
     private Connection createDB() throws SQLException {
-      java.nio.file.Path currentRelativePath = Paths.get("");
-      String cwd = currentRelativePath.toAbsolutePath().toString();
-      final String statedb = "jdbc:sqlite:" + cwd + "/" + name + ".sqlite";
       try {
-        Connection conn = DriverManager.getConnection(statedb);
-        if (conn  != null) {
+        Connection conn = getConnection(name);
+        if (conn != null) {
           Statement stmt = conn.createStatement();
           String ctas = "CREATE TABLE IF NOT EXISTS FILES" +
-          " (SRC TEXT NOT NULL PRIMARY KEY " +
-          ", DST TEXT NOT NULL " +
-          ", SIZE INT NOT NULL " +
-          ", COPIED BOOLEAN)";
+              " (SRC TEXT NOT NULL PRIMARY KEY " +
+              ", DST TEXT NOT NULL " +
+              ", SIZE INT NOT NULL " +
+              ", NODE_ID INT NOT NULL " +
+              ", COPIED BOOLEAN)";
           stmt.executeUpdate(ctas);
           stmt.close();
         }
@@ -75,13 +103,12 @@ public abstract class Works {
 
     @Override
     public void execute(Configuration conf) throws Exception {
-      
-      Connection db = createDB();
-      db.setAutoCommit(false);
-      PreparedStatement insert = db.prepareStatement("INSERT INTO FILES VALUES(?, ?, ?, ?)");
-      FileSystem fs = FileSystem.get(new URI(src), conf);
-      try {
+      try (Connection db = createDB(); FileSystem fs = FileSystem.get(new URI(src), conf)) {
+        db.setAutoCommit(false);
+        PreparedStatement insert = db.prepareStatement("INSERT INTO FILES VALUES(?, ?, ?, ?, ?)");
+
         RemoteIterator<LocatedFileStatus> listFiles = fs.listFiles(new org.apache.hadoop.fs.Path(src), true);
+        int nodeIndex = 0;
         while (listFiles.hasNext()) {
           LocatedFileStatus lf = listFiles.next();
           String from = lf.getPath().toString();
@@ -90,72 +117,106 @@ public abstract class Works {
           insert.setString(1, from);
           insert.setString(2, to);
           insert.setLong(3, size);
-          insert.setBoolean(4, false);
+          insert.setInt(4, nodeIndex++);
+          insert.setBoolean(5, false);
           insert.executeUpdate();
+          nodeIndex = nodeIndex % numNodes;
+          processedFiles.mark();
         }
         db.commit();
-      } finally {
-        if(fs != null) {
-          fs.close();
-        }
-        if (db != null) {
-          db.close();
-        }
       }
     }
-
 
     @Override
     public String toString() {
       return String.format("Plan(%s, %s -> %s)", name, src, dst);
     }
   }
-  
+
+  /**
+   * To provide details about files to be copied over.
+   */
+  public static class InfoWork implements Work {
+
+    private final String name;
+
+    public InfoWork(String name) {
+      this.name = name;
+    }
+
+    @Override
+    public void execute(Configuration conf) throws Exception {
+      String stats = "select COUNT(1) as c, SUM(SIZE) as sz,"
+          + " COUNT(DISTINCT NODE_ID) distinctNodes, COPIED "
+          + "from FILES GROUP BY COPIED";
+
+      try(Connection conn = getConnection(name);
+          Statement stmt = conn.createStatement();
+          ResultSet rs = stmt.executeQuery(stats)) {
+
+        while (rs.next()) {
+          String copiedStatus = rs.getString(4);
+          if (copiedStatus.equalsIgnoreCase("0")) {
+            System.out.println("Copied files stats:");
+          } else {
+            System.out.println("Yet to be copied files stats:");
+          }
+
+          System.out.println("\tTotal files : " + rs.getString(1));
+          System.out.println("\tTotal size : " + rs.getString(2));
+          System.out.println("\tDistinct Nodes : " + rs.getString(3));
+
+          System.out.println();
+        }
+      }
+    }
+  }
 
   public static class CopyWork implements Work {
-    
+
     private final String name;
     private final int parallel;
     private long numFiles = -1;
     private long totalSize = -1;
-    
-    public CopyWork(String name, int parallel) {
+    private final int nodeId;
+
+    public CopyWork(String name, int parallel, int nodeId) {
       this.name = name;
       this.parallel = parallel;
-    }
-    
-    private Connection createDB() throws SQLException {
-      java.nio.file.Path currentRelativePath = Paths.get("");
-      String cwd = currentRelativePath.toAbsolutePath().toString();
-      final String statedb = "jdbc:sqlite:" + cwd + "/" + name + ".sqlite";
-      try {
-        Connection conn = DriverManager.getConnection(statedb);
-        return conn;
-      } catch (SQLException e) {
-        System.out.println(e.getMessage());
-        throw e;
-      }
+      this.nodeId = nodeId;
     }
 
     @Override
     public void execute(final Configuration conf) throws Exception {
-      Connection db = createDB();
-
-      try {
+      try (Connection db = getConnection(name)) {
         Statement stmt = db.createStatement();
-        String stats = "select COUNT(1) as c, SUM(SIZE) as sz from FILES";
-        ResultSet rs  = stmt.executeQuery(stats);
+        String stats = "select COUNT(1) as c, SUM(SIZE) as sz from FILES ";
+        if (nodeId != -1) {
+         stats = stats +" WHERE NODE_ID=" + nodeId;
+        }
+        ResultSet rs = stmt.executeQuery(stats);
         while (rs.next()) {
           numFiles = rs.getInt("c");
           totalSize = rs.getLong("sz");
         }
         rs.close();
         stmt.close();
-        
+
+        if (numFiles == 0) {
+          System.out.println("No files to copy.");
+          return;
+        }
+
         stmt = db.createStatement();
-        String inputs = "select SRC, DST, SIZE from FILES where copied <> 1 ORDER BY SIZE";
+        String inputs =
+            "select SRC, DST, SIZE from FILES where copied <> 1 ";
+        if (nodeId != -1) {
+          inputs = inputs + " AND NODE_ID=" + nodeId;
+        }
+        inputs = inputs + " ORDER BY SIZE";
+
         rs = stmt.executeQuery(inputs);
-        int maxItems =  (int) (numFiles + 1);
+        int maxItems = (int) (numFiles + 1);
         ArrayBlockingQueue<CopyOp> copies = new ArrayBlockingQueue<>(maxItems);
         while (rs.next()) {
           copies.offer(new CopyOp(rs.getString(1), rs.getString(2), rs
@@ -163,17 +224,22 @@ public abstract class Works {
         }
         rs.close();
         stmt.close();
+
+        if (copies.isEmpty()) {
+          System.out.println("All files are already copied as per database. "
+              + "If you still need to recopy, run `plan` again.");
+          return;
+        }
+
         ExecutorService pool = Executors.newFixedThreadPool(parallel);
         Future<?>[] results = new Future<?>[parallel];
         for (int i = 0; i < parallel; i++) {
-          results[i] = pool.submit(new CopyWorker(conf, copies, db));
+          results[i] = pool.submit(new CopyWorker(conf, copies, db, nodeId));
         }
         for (int i = 0; i < parallel; i++) {
           results[i].get();
         }
         pool.shutdown();
-      } finally {
-        db.close();
       }
     }
 
@@ -182,7 +248,7 @@ public abstract class Works {
       return String.format("CopyWork(%s)", name);
     }
   }
-  
+
   public static class CopyOp {
     public final String src;
     public final String dst;
@@ -192,17 +258,17 @@ public abstract class Works {
       this.src = src;
       this.dst = dst;
       if (src.equals(dst)) {
-        throw new IllegalArgumentException(String.format("Source cannot be the same as destination: %s", src));
+        throw new IllegalArgumentException(
+            String.format("Source cannot be the same as destination: %s", src));
       }
       this.size = size;
     }
-    
+
     @Override
     public String toString() {
       return String.format("%s -(%d)-> %s", src, size, dst);
     }
   }
-  
 
   public static class CopyWorker implements Callable<Boolean> {
     private static final Logger LOG = LoggerFactory.getLogger(CopyWorker.class
@@ -211,16 +277,18 @@ public abstract class Works {
     final ArrayBlockingQueue<CopyOp> queue;
     final Configuration conf;
     final Connection db;
+    final int nodeId;
     static final AtomicInteger counter = new AtomicInteger(0);
-    
-    public CopyWorker(Configuration conf, ArrayBlockingQueue<CopyOp> copies, Connection db) {
+
+    public CopyWorker(Configuration conf, ArrayBlockingQueue<CopyOp> copies,
+        Connection db, int nodeId) {
       this.queue = copies;
       this.conf = conf;
       this.db = db;
+      this.nodeId = nodeId;
     }
 
-    private void complete(CopyOp op) throws IOException   {
-      System.out.println(Thread.currentThread().getName() + " :" + op );
+    private void complete(CopyOp op) throws IOException {
       System.out.println("Pending copies : " + queue.size());
       synchronized (db) {
         try {
@@ -255,14 +323,16 @@ public abstract class Works {
 
       do {
         try {
+          System.out.println("Opening " + op.src + "-->" + op.dst);
           FSDataInputStream in = srcFS.open(new Path(op.src));
           FSDataOutputStream out = dstFS.create(new Path(op.dst), true);
-          IOUtils.copyBytes(in, out, 1024*1024);
+          IOUtils.copyBytes(in, out, 1024 * 1024);
           in.close();
           out.close();
-          LOG.info("Copied {}", op);
+          LOG.info("Copied (nodeId={}) {}", nodeId, op);
           // everything looks okay 
           complete(op);
+          processedFiles.mark();
           op = this.queue.poll();
           if (op == null) {
             break;
@@ -274,7 +344,7 @@ public abstract class Works {
           e.printStackTrace();
           break;
         }
-      } while(true);
+      } while (true);
     }
 
     @Override
@@ -283,6 +353,5 @@ public abstract class Works {
       return true;
     }
   }
-
 
 }
