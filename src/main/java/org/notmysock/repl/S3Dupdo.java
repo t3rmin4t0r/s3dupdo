@@ -4,6 +4,7 @@ import org.apache.commons.cli.BasicParser;
 import org.apache.commons.cli.CommandLine;
 import org.apache.commons.cli.CommandLineParser;
 import org.apache.commons.cli.HelpFormatter;
+import org.apache.commons.cli.Option;
 import org.apache.commons.cli.Options;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.conf.Configured;
@@ -41,6 +42,7 @@ public class S3Dupdo extends Configured implements Tool {
     options.addOption("s", "src", true, "source data");
     options.addOption("d", "dst", true, "destination data");
     options.addOption("v", "verbose", true, "verbose");
+    options.addOption("awsKey", "awsKey", true, "AWS accesskey:secret");
   }
 
   private static void help(String error) {
@@ -65,6 +67,13 @@ public class S3Dupdo extends Configured implements Tool {
       op = Operation.getOperation(line.getOptionValue("operation"));
     }
 
+    if (line.hasOption("awsKey")) {
+      String awsKey = line.getOptionValue("awsKey");
+      String[] ks = awsKey.split(":", 2);
+      conf.set("fs.s3a.access.key", ks[0]);
+      conf.set("fs.s3a.secret.key", ks[1]);
+    }
+
     if (line.getArgList().size() == 0) {
       help("Provide DB file name where it should be persisted to.");
       return 1;
@@ -73,6 +82,19 @@ public class S3Dupdo extends Configured implements Tool {
     final String name = (String) line.getArgList().get(0);
 
     final Work work;
+
+    final int parallel;
+    // Set nodeId to -1 if unspecified. This node would pull all files.
+    int nodeId = (line.hasOption("nodeId")) ?
+        Integer.parseInt(line.getOptionValue("nodeId")) : -1;
+    if (nodeId != -1) {
+      System.out.println("Using nodeId: " + nodeId);
+    }
+    if (!line.hasOption("parallel")) {
+      parallel = 1;
+    } else {
+      parallel = Integer.parseInt(line.getOptionValue("parallel"));
+    }
 
     switch (op) {
     case PLAN:
@@ -93,18 +115,6 @@ public class S3Dupdo extends Configured implements Tool {
           line.getOptionValue("dst"), numNodes);
       break;
     case RUN:
-      final int parallel;
-      // Set nodeId to -1 if unspecified. This node would pull all files.
-      int nodeId = (line.hasOption("nodeId")) ?
-          Integer.parseInt(line.getOptionValue("nodeId")) : -1;
-      if (nodeId != -1) {
-        System.out.println("Using nodeId: " + nodeId);
-      }
-      if (!line.hasOption("parallel")) {
-        parallel = 1;
-      } else {
-        parallel = Integer.parseInt(line.getOptionValue("parallel"));
-      }
       work = new Works.CopyWork(name, parallel, nodeId);
       break;
     case INFO:
@@ -116,7 +126,7 @@ public class S3Dupdo extends Configured implements Tool {
       break;
     case VERIFY:
       // TODO
-      work = null;
+      work = new Works.VerifyWork(name, parallel);
       break;
     default:
       work = null;

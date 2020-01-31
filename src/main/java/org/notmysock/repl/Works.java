@@ -21,18 +21,22 @@ import java.util.concurrent.atomic.AtomicInteger;
 import com.codahale.metrics.ConsoleReporter;
 import com.codahale.metrics.Meter;
 import com.codahale.metrics.MetricRegistry;
+
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FSDataOutputStream;
+import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.LocatedFileStatus;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.RemoteIterator;
 import org.apache.hadoop.io.IOUtils;
+import org.notmysock.repl.Works.CopyOp;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 public abstract class Works {
+
 
   static final MetricRegistry metricRegistry = new MetricRegistry();
   static final String PROCESSED_FILES = "processedFiles";
@@ -353,5 +357,162 @@ public abstract class Works {
       return true;
     }
   }
+  
+  public static class VerifyWork implements Work {
 
+    private final String name;
+    private final int parallel;
+
+    private int numFiles;
+    private long totalSize;
+
+    public VerifyWork(String name, int parallel) {
+      this.name = name;
+      this.parallel = parallel;
+    }
+
+    @Override
+    public void execute(Configuration conf) throws Exception {
+
+      try (Connection db = getConnection(name)) {
+        Statement stmt = db.createStatement();
+        String stats = "select COUNT(1) as c, SUM(SIZE) as sz from FILES ";
+        ResultSet rs = stmt.executeQuery(stats);
+        while (rs.next()) {
+          numFiles = rs.getInt("c");
+          totalSize = rs.getLong("sz");
+        }
+
+        stmt = db.createStatement();
+        String inputs = "select DST, SIZE from FILES WHERE COPIED = 1";
+
+        rs = stmt.executeQuery(inputs);
+        int maxItems = (int) (numFiles + 1);
+        ArrayBlockingQueue<VerifyOp> files = new ArrayBlockingQueue<>(maxItems);
+        while (rs.next()) {
+          files.offer(new VerifyOp(rs.getString(1), rs.getLong(2)));
+        }
+        rs.close();
+        stmt.close();
+
+        if (files.isEmpty()) {
+          System.out
+              .println("No files have been copied, or flip the copied flag on sqlite: "
+                  + name);
+          return;
+        }
+
+        ExecutorService pool = Executors.newFixedThreadPool(parallel);
+        Future<?>[] results = new Future<?>[parallel];
+        for (int i = 0; i < parallel; i++) {
+          results[i] = pool.submit(new VerifyWorker(conf, files, db));
+        }
+        for (int i = 0; i < parallel; i++) {
+          results[i].get();
+        }
+        pool.shutdown();
+      }
+
+    }
+  }
+
+  public static class VerifyOp {
+
+    private final String path;
+    private final long size;
+    private Boolean valid = null;
+
+    public VerifyOp(String path, long size) {
+      this.path = path;
+      this.size = size;
+    }
+
+    @Override
+    public String toString() {
+      return String.format("%s -(%d)-> %s", path, size, valid);
+    }
+
+    public void setValid(boolean v) {
+      this.valid = v;
+    }
+  }
+
+  public static class VerifyWorker implements Callable<Boolean> {
+    private static final Logger LOG = LoggerFactory
+        .getLogger(VerifyWorker.class.getName());
+
+    final ArrayBlockingQueue<VerifyOp> queue;
+    final Configuration conf;
+    final Connection db;
+    static final AtomicInteger counter = new AtomicInteger(0);
+
+    public VerifyWorker(Configuration conf,
+        ArrayBlockingQueue<VerifyOp> copies, Connection db) {
+      this.queue = copies;
+      this.conf = conf;
+      this.db = db;
+    }
+
+    private void incomplete(VerifyOp op) throws IOException {
+      synchronized (db) {
+        try {
+          PreparedStatement update = db
+              .prepareStatement("UPDATE FILES SET COPIED=-1 WHERE DST=?");
+          update.setString(1, op.path);
+          update.executeUpdate();
+          update.close();
+        } catch (SQLException e) {
+          e.printStackTrace();
+          throw new IOException(e);
+        }
+      }
+    }
+
+    public void run() {
+      VerifyOp op = this.queue.poll();
+      Thread.currentThread().setName(
+          String.format("VerifyWorker-%02d", counter.getAndIncrement()));
+      final FileSystem dstFS;
+      try {
+        dstFS = FileSystem.newInstance(new URI(op.path), conf);
+      } catch (IOException e) {
+        e.printStackTrace();
+        return;
+      } catch (URISyntaxException e) {
+        e.printStackTrace();
+        return;
+      }
+
+      do {
+        try {
+          FileStatus statm = dstFS.getFileStatus(new Path(op.path));
+          boolean valid = (statm.getLen() == op.size);
+          op.setValid(valid);
+          if (!valid) {
+            incomplete(op);
+          }
+          System.out.println(op);
+          System.out.println("Pending verifies : " + queue.size());
+          processedFiles.mark();
+          op = this.queue.poll();
+          if (op == null) {
+            break;
+          }
+        } catch (IllegalArgumentException e) {
+          e.printStackTrace();
+          break;
+        } catch (IOException e) {
+          e.printStackTrace();
+          break;
+        }
+      } while (true);
+    }
+
+    @Override
+    public Boolean call() throws Exception {
+      run();
+      return true;
+    }
+
+  }
 }
