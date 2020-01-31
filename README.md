@@ -20,6 +20,7 @@ java -cp ./target/*:./target/lib/*:.: org.notmysock.repl.S3Dupdo
 usage: S3Dupdo [-d <arg>] [-i <arg>] [-n <arg>] [-op <arg>] [-p <arg>] [-s
        <arg>] [-v <arg>]
 Missing operation
+ -awsKey <accesskey:secretkey> pass in aws keys
  -d,--dst <arg>          destination data
  -i,--nodeId <arg>       nodeId during copy
  -n,--nodes <arg>        parallelize n-nodes
